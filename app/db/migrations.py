@@ -1989,4 +1989,66 @@ Freundliche Grüsse',
                 ADD COLUMN sender_addition TEXT NOT NULL DEFAULT '';
         """,
     ),
+    Migration(
+        version=61,
+        description="Web-Registrierungen from a second source: a "
+        "Teilnahmeerklärung pasted from an email. It has no Cloudflare id, so "
+        "cloudflare_id becomes nullable (SQLite cannot drop NOT NULL in place: "
+        "copy-drop-rename with foreign keys off, as in migration 43). "
+        "`source` says where a row came from ('leg_ittigen' for every existing "
+        "row). The email names the address of the connection (site_*) apart "
+        "from the postal address; empty means the same as the postal address, "
+        "which is what every leg-ittigen.ch row means. A reported meter may "
+        "say whether it is Bezug or Einspeisung (`direction`); NULL means not "
+        "said, as before.",
+        sql="""
+            PRAGMA foreign_keys = OFF;
+
+            CREATE TABLE web_registration_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cloudflare_id INTEGER UNIQUE,
+                source TEXT NOT NULL DEFAULT 'leg_ittigen'
+                    CHECK (source IN ('leg_ittigen', 'email')),
+                company TEXT NOT NULL DEFAULT '',
+                salutation TEXT NOT NULL DEFAULT '',
+                first_name TEXT NOT NULL DEFAULT '',
+                last_name TEXT NOT NULL DEFAULT '',
+                street TEXT NOT NULL DEFAULT '',
+                house_number TEXT NOT NULL DEFAULT '',
+                postal_code TEXT NOT NULL DEFAULT '',
+                city TEXT NOT NULL DEFAULT '',
+                site_street TEXT NOT NULL DEFAULT '',
+                site_house_number TEXT NOT NULL DEFAULT '',
+                site_postal_code TEXT NOT NULL DEFAULT '',
+                site_city TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                bkw_customer_number TEXT NOT NULL DEFAULT '',
+                iban TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                submitted_at TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                person_taken_over INTEGER NOT NULL DEFAULT 0,
+                site_taken_over INTEGER NOT NULL DEFAULT 0,
+                CHECK (source = 'email' OR cloudflare_id IS NOT NULL)
+            );
+            INSERT INTO web_registration_new
+                (id, cloudflare_id, source, company, salutation, first_name, last_name,
+                 street, house_number, postal_code, city, email, phone, bkw_customer_number,
+                 iban, message, submitted_at, imported_at, person_taken_over, site_taken_over)
+            SELECT id, cloudflare_id, 'leg_ittigen', company, salutation, first_name, last_name,
+                   street, house_number, postal_code, city, email, phone, bkw_customer_number,
+                   iban, message, submitted_at, imported_at, person_taken_over, site_taken_over
+            FROM web_registration;
+            DROP TABLE web_registration;
+            ALTER TABLE web_registration_new RENAME TO web_registration;
+            CREATE INDEX idx_web_registration_email ON web_registration(email);
+
+            ALTER TABLE web_registration_meter
+                ADD COLUMN direction TEXT CHECK (direction IN ('consumption', 'feed_in'));
+
+            PRAGMA foreign_key_check;
+            PRAGMA foreign_keys = ON;
+        """,
+    ),
 ]

@@ -239,6 +239,40 @@ und wird standardmässig ausgeblendet (Umschalter „Auch vollständig
 Registrierungen bestehen, weist die Übersichtsseite mit einem Link darauf
 hin.
 
+### Teilnahmeerklärung aus einer Email einfügen
+
+Kommt eine Anmeldung als Email mit Formularzeilen („Vorname: …“,
+„Messpunktnummer Bezug: …“, „Anschluss Strasse: …“ usw.), landet sie über
+den Knopf **„Teilnahmeerklärung einfügen“** auf derselben Seite im selben
+Posteingang: den ganzen Text der Email einfügen, die Vorschau prüfen,
+**„In den Eingang übernehmen“**. Gruss, Signatur und Zitatzeichen werden
+übergangen. Danach wird die Anmeldung wie jede Web-Registrierung
+übernommen, mit zwei Unterschieden:
+
+- Der **Standort** wird aus der **Anschlussadresse** erfasst, die von der
+  Postadresse abweichen kann; die Postadresse geht in die Person.
+- Bei jedem **Messpunkt** ist schon vorausgefüllt, ob Bezug oder
+  Einspeisung.
+
+Nicht übernommen wird ein Text ohne Email-Adresse, ohne Name oder Firma,
+ohne Messpunktnummer oder mit derselben Nummer für Bezug und Einspeisung.
+Zweifelhaftes (ungültige IBAN, Messpunktnummer mit falscher Länge,
+Einspeisung ohne IBAN, „Ich: …“ passt nicht zu den Nummern) wird nur
+angezeigt. Was es schon gibt, ist kein Fehler: der Eintrag bietet wie
+üblich „Vorhandenen … verknüpfen“ an. Ein Hinweis erscheint nur bei einem
+Widerspruch — ein Messpunkt ist mit der anderen Messrichtung erfasst,
+gehört zu einem anderen Standort oder ist einer anderen Person zugeordnet.
+
+Liegt vom selben Absender – gleiche Email-Adresse, gleicher Name, gleiche
+Firma oder gleiche BKW-Kundennummer – schon eine eingefügte Anmeldung im
+Eingang, fragt der Dialog: **eine bestehende aktualisieren** (eine
+Korrektur) oder **als neue Anmeldung hinzufügen** (z. B. ein zweiter
+Anschluss). Vorgeschlagen wird die Anmeldung für denselben Anschluss, sonst
+„neu“; die Wahl lässt sich ändern. Beim Aktualisieren bleibt bereits
+Übernommenes übernommen; ist der Text identisch, ändert sich nichts.
+Einträge von leg-ittigen.ch werden dabei nie angeboten. Löschen entfernt
+eine eingefügte Anmeldung nur aus dem Eingang; die Email im Postfach bleibt.
+
 ---
 
 ## 5. E-Mail-Versand

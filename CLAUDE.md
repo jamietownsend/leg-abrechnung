@@ -70,9 +70,11 @@ Strict layering, don't blur it:
 - `app/gui/pages/` — one module per `@ui.page("/...")`, registered by the
   side-effecting import of `app/gui/pages/__init__.py` in `app/main.py`.
   No SQL, no business rules.
-- `app/importers/` — EBIX/CSV readings, camt.053/054 statements. Each format
-  isolated behind a parsed-record dataclass (`ParsedReading`,
-  `ParsedBankTransaction`).
+- `app/importers/` — EBIX/CSV readings, camt.053/054 statements, and
+  Web-Registrierungen (leg-ittigen.ch API; a Teilnahmeerklärung pasted from
+  an email, `participation_email`). Each format isolated behind a
+  parsed-record dataclass (`ParsedReading`, `ParsedBankTransaction`,
+  `ParsedParticipation`).
 - `app/pdf/` — PDF/QR-bill (`qrbill`, `reportlab`, `svglib`, `pypdf`) and CSV
   export.
 - `app/emailing/` — Microsoft Graph (not SMTP; Basic Auth is off for Exchange

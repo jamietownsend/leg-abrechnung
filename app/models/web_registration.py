@@ -1,10 +1,17 @@
-"""WebRegistration: an inbox row for one registration submitted through the public form on leg-
-ittigen.ch (see `app.importers.registration_sync`)."""
+"""WebRegistration: an inbox row for one registration -- submitted through the public form on leg-
+ittigen.ch (see `app.importers.registration_sync`), or a Teilnahmeerklärung pasted from an email
+(see `app.importers.participation_email`)."""
 
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+from app.sort_keys import fold_for_sort
+
+#: Where a row came from: the leg-ittigen.ch form, or a Teilnahmeerklärung pasted from an email.
+SOURCE_LEG_ITTIGEN = "leg_ittigen"
+SOURCE_EMAIL = "email"
 
 
 @dataclass
@@ -16,6 +23,8 @@ class WebRegistrationMeter:
     meter_number: str
     note: str
     metering_point_taken_over: bool = False
+    #: `DIRECTION_CONSUMPTION` / `DIRECTION_FEED_IN` when the sender said which; None otherwise.
+    direction: Optional[str] = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "WebRegistrationMeter":
@@ -26,15 +35,17 @@ class WebRegistrationMeter:
             meter_number=row["meter_number"],
             note=row["note"],
             metering_point_taken_over=bool(row["metering_point_taken_over"]),
+            direction=row["direction"],
         )
 
 
 @dataclass
 class WebRegistration:
-    """One registration submitted through the leg-ittigen.ch public form."""
+    """One registration, from the leg-ittigen.ch form or a pasted Teilnahmeerklärung."""
 
     id: Optional[int]
-    cloudflare_id: int
+    #: None for a pasted email, which has no Cloudflare row behind it.
+    cloudflare_id: Optional[int]
     company: str
     salutation: str
     first_name: str
@@ -53,6 +64,29 @@ class WebRegistration:
     person_taken_over: bool = False
     site_taken_over: bool = False
     meters: list[WebRegistrationMeter] = field(default_factory=list)
+    source: str = SOURCE_LEG_ITTIGEN
+    #: The building the meters are in, when it is not the postal address; all empty means the same.
+    site_street: str = ""
+    site_house_number: str = ""
+    site_postal_code: str = ""
+    site_city: str = ""
+
+    @property
+    def is_from_email(self) -> bool:
+        """Whether this row was pasted from an email rather than fetched from leg-ittigen.ch."""
+        return self.source == SOURCE_EMAIL
+
+    @property
+    def has_own_site_address(self) -> bool:
+        """Whether the connection is at an address of its own, apart from the postal address."""
+        return any((self.site_street, self.site_house_number, self.site_postal_code, self.site_city))
+
+    @property
+    def site_address(self) -> tuple[str, str, str, str]:
+        """Street, number, PLZ and place of the connection -- the postal address unless one was given."""
+        if self.has_own_site_address:
+            return (self.site_street, self.site_house_number, self.site_postal_code, self.site_city)
+        return (self.street, self.house_number, self.postal_code, self.city)
 
     @property
     def display_name(self) -> str:
@@ -95,6 +129,11 @@ class WebRegistration:
             person_taken_over=bool(row["person_taken_over"]),
             site_taken_over=bool(row["site_taken_over"]),
             meters=meters,
+            source=row["source"],
+            site_street=row["site_street"],
+            site_house_number=row["site_house_number"],
+            site_postal_code=row["site_postal_code"],
+            site_city=row["site_city"],
         )
 
 
@@ -212,6 +251,139 @@ def upsert_from_submission(connection: sqlite3.Connection, registration: WebRegi
 
     connection.commit()
     return web_registration_id
+
+
+#: What `save_from_email` did with a pasted Teilnahmeerklärung.
+SAVED_CREATED = "created"
+SAVED_UPDATED = "updated"
+SAVED_UNCHANGED = "unchanged"
+
+#: What a pasted row consists of -- written on save, compared to tell a repeat from a change.
+_EMAIL_COMPARED_FIELDS = (
+    "company",
+    "first_name",
+    "last_name",
+    "street",
+    "house_number",
+    "postal_code",
+    "city",
+    "site_street",
+    "site_house_number",
+    "site_postal_code",
+    "site_city",
+    "email",
+    "phone",
+    "bkw_customer_number",
+    "iban",
+    "message",
+    "submitted_at",
+)
+
+
+def _site_key(registration: WebRegistration) -> tuple[str, ...]:
+    """The connection address, compared without case or surrounding blanks."""
+    street, house_number, postal_code, _city = registration.site_address
+    return tuple(part.strip().lower() for part in (street, house_number, postal_code))
+
+
+def _same_sender(row: sqlite3.Row, registration: WebRegistration) -> bool:
+    """Same email address, same name, same Firma or same BKW customer number -- any one is enough."""
+    pairs = [
+        (row["email"], registration.email),
+        (row["bkw_customer_number"], registration.bkw_customer_number),
+        (row["company"], registration.company),
+    ]
+    if fold_for_sort(row["first_name"]) and fold_for_sort(row["last_name"]):
+        pairs.append(
+            (f"{row['first_name']} {row['last_name']}", f"{registration.first_name} {registration.last_name}")
+        )
+    return any(fold_for_sort(stored) and fold_for_sort(stored) == fold_for_sort(new) for stored, new in pairs)
+
+
+def list_update_candidates(
+    connection: sqlite3.Connection, registration: WebRegistration
+) -> list[WebRegistration]:
+    """Pasted rows from the same sender, newest first -- what a new paste might update."""
+    rows = connection.execute(
+        "SELECT * FROM web_registration WHERE source = ? ORDER BY submitted_at DESC, id DESC",
+        (SOURCE_EMAIL,),
+    ).fetchall()
+    return [
+        WebRegistration.from_row(row, _load_meters(connection, row["id"]))
+        for row in rows
+        if _same_sender(row, registration)
+    ]
+
+
+def suggested_update(
+    candidates: list[WebRegistration], registration: WebRegistration
+) -> Optional[WebRegistration]:
+    """Which row a new paste most likely corrects: the one for the same connection. Only a suggestion."""
+    return next((c for c in candidates if _site_key(c) == _site_key(registration)), None)
+
+
+def is_unchanged(existing: WebRegistration, registration: WebRegistration) -> bool:
+    """Whether a paste says exactly what the row already holds."""
+    return all(
+        getattr(existing, name) == getattr(registration, name) for name in _EMAIL_COMPARED_FIELDS
+    ) and {(m.meter_number, m.direction) for m in existing.meters} == {
+        (m.meter_number, m.direction) for m in registration.meters
+    }
+
+
+def save_from_email(
+    connection: sqlite3.Connection, registration: WebRegistration, *, update_id: Optional[int] = None
+) -> tuple[int, str]:
+    """Add a pasted Teilnahmeerklärung as a new row, or update row `update_id` -- whoever pastes decides.
+
+    An update replaces the row's content and keeps what was already taken over, per meter number.
+    """
+    existing = None
+    if update_id is not None:
+        existing = get(connection, update_id)
+        if existing is None or not existing.is_from_email:
+            raise ValueError(f"Keine eingefügte Anmeldung #{update_id} zum Aktualisieren.")
+        if is_unchanged(existing, registration):
+            return existing.id, SAVED_UNCHANGED
+
+    now = datetime.now(timezone.utc).isoformat()
+    values = tuple(getattr(registration, name) for name in _EMAIL_COMPARED_FIELDS)
+    if existing is None:
+        columns = ", ".join(_EMAIL_COMPARED_FIELDS)
+        cursor = connection.execute(
+            f"INSERT INTO web_registration (source, {columns}, imported_at) "  # nosec B608 -- fixed names
+            f"VALUES (?, {', '.join('?' for _ in _EMAIL_COMPARED_FIELDS)}, ?)",
+            (SOURCE_EMAIL, *values, now),
+        )
+        web_registration_id = cursor.lastrowid
+        outcome = SAVED_CREATED
+        taken_over_before: dict[str, bool] = {}
+    else:
+        assignments = ", ".join(f"{name} = ?" for name in _EMAIL_COMPARED_FIELDS)
+        connection.execute(
+            f"UPDATE web_registration SET {assignments}, imported_at = ? WHERE id = ?",  # nosec B608 -- fixed names
+            (*values, now, existing.id),
+        )
+        web_registration_id = existing.id
+        outcome = SAVED_UPDATED
+        taken_over_before = {m.meter_number: m.metering_point_taken_over for m in existing.meters}
+        connection.execute("DELETE FROM web_registration_meter WHERE web_registration_id = ?", (existing.id,))
+
+    for meter in registration.meters:
+        connection.execute(
+            "INSERT INTO web_registration_meter "
+            "(web_registration_id, meter_number, note, metering_point_taken_over, direction) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                web_registration_id,
+                meter.meter_number,
+                meter.note,
+                taken_over_before.get(meter.meter_number, False),
+                meter.direction,
+            ),
+        )
+    connection.commit()
+    return web_registration_id, outcome
 
 
 def mark_person_taken_over(connection: sqlite3.Connection, web_registration_id: int) -> None:

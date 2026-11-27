@@ -1,5 +1,6 @@
 """Web-Registrierungen page: inbox for registrations submitted through the public form on leg-
-ittigen.ch (see `app.importers.registration_sync`)."""
+ittigen.ch (see `app.importers.registration_sync`) or pasted from a Teilnahmeerklärung email (see
+`app.importers.participation_email`)."""
 
 from datetime import date, datetime
 from typing import Callable, Optional
@@ -12,6 +13,7 @@ from app.gui.metering_point_form import open_metering_point_form
 from app.domain.address_lookup import verify
 from app.gui.filter_bar import FilterBar
 from app.gui.navigation import page_frame
+from app.gui.participation_paste_dialog import open_participation_paste_dialog
 from app.gui.person_form import open_person_form
 from app.gui.print_list import render_print_button
 from app.gui.safe_notify import safe_notify
@@ -34,6 +36,7 @@ from app.importers.registration_sync import sync_registrations
 from app.models import person_onboarding as person_onboarding_repo
 from app.models import site as site_repo
 from app.models import web_registration as web_registration_repo
+from app.models.metering_point import DIRECTION_FEED_IN
 from app.models.web_registration import WebRegistration, WebRegistrationMeter
 
 #: `(label, field)` pairs for the printed table.
@@ -56,11 +59,19 @@ def _print_row(reg: WebRegistration) -> dict:
         "submitted": reg.submitted_at,
         "email": reg.email,
         "phone": reg.phone,
-        "address": f"{reg.street} {reg.house_number}, {reg.postal_code} {reg.city}".strip(", "),
+        "address": f"{reg.street} {reg.house_number}, {reg.postal_code} {reg.city}".strip(", ")
+        + (" / Anschluss: {} {}, {} {}".format(*reg.site_address) if reg.has_own_site_address else ""),
         "bkw_customer_number": reg.bkw_customer_number,
-        "meters": ", ".join(m.meter_number for m in reg.meters) or "-",
+        "meters": ", ".join(_meter_label(m) for m in reg.meters) or "-",
         "status": "Vollständig übernommen" if reg.is_fully_processed else "Offen",
     }
+
+
+def _meter_label(meter: WebRegistrationMeter) -> str:
+    """The reported number, with Bezug/Einspeisung or the sender's note when known."""
+    if meter.direction:
+        return f"{meter.meter_number} ({'Einspeisung' if meter.direction == DIRECTION_FEED_IN else 'Bezug'})"
+    return meter.meter_number + (f" ({meter.note})" if meter.note else "")
 
 
 def _parse_bkw_customer_number(value: str) -> Optional[int]:
@@ -113,8 +124,10 @@ def web_registrations_page() -> None:
         with ui.row().classes("w-full items-start justify-between gap-4"):
             ui.label(
                 "Registrierungen, die Interessierte über das Anmeldeformular "
-                "auf leg-ittigen.ch eingereicht haben -- pro Person/Firma ein "
-                "Eintrag, mit allen dabei gemeldeten Zählern. Person, "
+                "auf leg-ittigen.ch eingereicht haben, und eingefügte "
+                "Teilnahmeerklärungen aus Emails -- pro Person/Firma ein "
+                "Eintrag (bei Emails: pro Anschluss), mit allen dabei gemeldeten "
+                "Zählern. Person, "
                 "Standort und jeder gemeldete Zähler (als Messpunkt) können "
                 "hier je einzeln übernommen werden; die Zuordnung "
                 "zwischen ihnen bleibt ein manueller Schritt unter "
@@ -131,6 +144,9 @@ def web_registrations_page() -> None:
                     # Named on its own line: a printout is read away from
                     # the screen, where the order is not self-evident.
                     get_sort_description=lambda: sort_description(SORT_OPTIONS, sort_select),
+                )
+                ui.button(
+                    "Teilnahmeerklärung einfügen", on_click=lambda: open_participation_paste_dialog(refresh)
                 )
                 ui.button("Registrierungen abrufen", on_click=lambda: do_sync())
 
@@ -236,6 +252,8 @@ def web_registrations_page() -> None:
                             ui.label(reg.display_name or "-").classes("font-bold")
                             if reg.is_fully_processed:
                                 ui.badge("Vollständig übernommen", color="grey")
+                            if reg.is_from_email:
+                                ui.badge("Email", color="info").tooltip("Eingefügte Teilnahmeerklärung")
                         ui.label(f"Eingegangen: {reg.submitted_at}").classes("text-caption text-grey-6")
                     with ui.column().classes("gap-0 min-w-[180px]"):
                         ui.label(reg.email or "-")
@@ -255,6 +273,18 @@ def web_registrations_page() -> None:
                                 if finding.suggestion
                                 else "Nicht im amtlichen Verzeichnis."
                             ).classes("text-caption text-warning")
+                        if reg.has_own_site_address:
+                            # The building the meters are in -- the Standort is created from this one.
+                            site_street, site_number, site_postal_code, site_city = reg.site_address
+                            ui.label(
+                                f"Anschluss: {site_street} {site_number}, {site_postal_code} {site_city}"
+                            ).classes("text-caption")
+                            for finding in verify(site_street, site_number, site_postal_code, site_city):
+                                ui.label(
+                                    f"Meinten Sie: {finding.suggestion}?"
+                                    if finding.suggestion
+                                    else "Nicht im amtlichen Verzeichnis."
+                                ).classes("text-caption text-warning")
                     with ui.column().classes("gap-0 min-w-[180px]"):
                         ui.label(f"BKW-Kundennummer: {reg.bkw_customer_number or '-'}")
                         ui.label(f"IBAN: {reg.iban or '-'}").classes("text-grey-7")
@@ -292,9 +322,12 @@ def web_registrations_page() -> None:
                     )
                     if reg.meters:
                         for meter in reg.meters:
+                            for conflict in match.meter_conflicts.get(meter.id, []):
+                                ui.label(f"⚠ {meter.meter_number}: {conflict}").classes(
+                                    "text-caption text-warning"
+                                )
                             with ui.row().classes("items-center gap-2"):
-                                meter_label = meter.meter_number + (f" ({meter.note})" if meter.note else "")
-                                ui.label(meter_label).classes("font-mono text-caption min-w-[160px]")
+                                ui.label(_meter_label(meter)).classes("font-mono text-caption min-w-[160px]")
                                 existing_mp = match.metering_points.get(meter.id)
                                 _take_over_row(
                                     "Messpunkt",
@@ -409,11 +442,13 @@ def web_registrations_page() -> None:
 
         def on_take_over_site(reg: WebRegistration) -> None:
             """Card button handler: open a prefilled site-creation dialog."""
+            # The connection's address, which a pasted Teilnahmeerklärung may give apart from the postal one.
+            street, house_number, postal_code, city = reg.site_address
             prefill = {
-                "street": reg.street,
-                "house_number": reg.house_number,
-                "postal_code": reg.postal_code,
-                "municipality": reg.city,
+                "street": street,
+                "house_number": house_number,
+                "postal_code": postal_code,
+                "municipality": city,
             }
 
             def on_site_saved(_site) -> None:
@@ -425,10 +460,9 @@ def web_registrations_page() -> None:
 
         def on_take_over_metering_point(reg: WebRegistration, meter: WebRegistrationMeter) -> None:
             """Card button handler: open a prefilled MeteringPoint-creation dialog."""
+            street, house_number, postal_code, _city = reg.site_address
             with connection_scope() as connection:
-                matching_site = site_repo.find_by_address(
-                    connection, reg.street, reg.house_number, reg.postal_code
-                )
+                matching_site = site_repo.find_by_address(connection, street, house_number, postal_code)
             submitted_number = meter.meter_number.strip().upper()
             full_designation = split_metering_point_designation(submitted_number)
             if full_designation:
@@ -444,6 +478,8 @@ def web_registrations_page() -> None:
                 prefill = {"metering_point_number": meter.meter_number}
             if matching_site is not None:
                 prefill["site_id"] = matching_site.id
+            if meter.direction:
+                prefill["direction"] = meter.direction
 
             def on_metering_point_saved(_metering_point) -> None:
                 with connection_scope() as connection:
@@ -463,7 +499,18 @@ def web_registrations_page() -> None:
                 # remote Worker database too, and that has no undo (see
                 # app.importers.cloudflare_client.delete_submissions), so
                 # the one thing this dialog must never do is stay silent.
-                if not reg.is_fully_processed:
+                if reg.is_from_email:
+                    ui.label(
+                        "Die Anmeldung wird nur aus dem Eingang entfernt; die Email in "
+                        "Ihrem Postfach bleibt, der Text lässt sich wieder einfügen."
+                        + (
+                            ""
+                            if reg.is_fully_processed
+                            else " Person, Standort und/oder Messpunkt(e) sind noch nicht "
+                            "vollständig übernommen."
+                        )
+                    ).classes("text-body2" + ("" if reg.is_fully_processed else " text-negative font-bold"))
+                elif not reg.is_fully_processed:
                     ui.label(
                         "⚠ Person, Standort und/oder Messpunkt(e) dieser "
                         "Registrierung wurden noch nicht vollständig "
@@ -483,6 +530,13 @@ def web_registrations_page() -> None:
                     ui.button("Abbrechen", on_click=confirm.close).props("flat")
 
                     def do_delete() -> None:
+                        if reg.is_from_email:
+                            with connection_scope() as connection:
+                                web_registration_repo.delete(connection, reg.id)
+                            confirm.close()
+                            safe_notify("Gelöscht.", type="warning")
+                            refresh()
+                            return
                         try:
                             token = get_leg_api_token()
                         except ConfigError as exc:
